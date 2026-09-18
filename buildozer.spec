@@ -13,7 +13,7 @@ fullscreen = 0
 # Android: modern 64-bit phones/tablets.
 android.archs = arm64-v8a
 android.api = 35
-android.minapi = 23
+android.minapi = 24
 android.permissions = INTERNET
 android.accept_sdk_license = True
 
