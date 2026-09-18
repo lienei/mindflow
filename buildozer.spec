@@ -6,7 +6,7 @@ source.dir = .
 source.include_exts = py,png,jpg,jpeg,json,mflow,txt
 source.exclude_dirs = .git,.github,__pycache__,bin,.buildozer
 version = 0.1.0
-requirements = python3,kivy,plyer
+requirements = python3,kivy,plyer,charset-normalizer==3.4.9
 orientation = landscape
 fullscreen = 0
 
