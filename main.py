@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-MindFlow Android v0.1
+MindFlow Android v0.3
 Kivy mobile port of the desktop MindFlow data model.
 
 Core goals:
@@ -13,7 +13,7 @@ Core goals:
 - Internal autosave
 """
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"
 
 import base64
 import json
@@ -83,6 +83,21 @@ def button_kwargs():
         "font_size": sp(15),
         "size_hint_x": None,
         "width": dp(90),
+    }
+    if CJK_FONT:
+        kw["font_name"] = CJK_FONT
+    return kw
+
+
+def toolbar_button_kwargs():
+    """Large, direct-touch toolbar buttons for Android.
+
+    These deliberately do NOT use a ScrollView and do not force a fixed width,
+    which avoids Android taps being interpreted as horizontal scrolling.
+    """
+    kw = {
+        "font_size": sp(14),
+        "size_hint": (1, 1),
     }
     if CJK_FONT:
         kw["font_name"] = CJK_FONT
@@ -704,36 +719,45 @@ class MindFlowAndroidApp(App):
 
         root = BoxLayout(orientation="vertical")
 
-        toolbar_scroll = ScrollView(
-            do_scroll_x=True,
-            do_scroll_y=False,
-            bar_width=dp(3),
+        # Android v0.3:
+        # Do NOT put action buttons inside a horizontal ScrollView.
+        # ScrollView can swallow small finger movements and make buttons feel dead.
+        # Use a fixed two-row toolbar so every tap goes directly to a Button.
+        toolbar = GridLayout(
+            cols=6,
+            rows=2,
+            spacing=dp(4),
+            padding=(dp(4), dp(4)),
             size_hint_y=None,
-            height=dp(56),
+            height=dp(108),
         )
-        toolbar = GridLayout(rows=1, spacing=dp(4), padding=(dp(4), dp(4)), size_hint_x=None)
-        toolbar.bind(minimum_width=toolbar.setter("width"))
 
         buttons = [
-            ("子主题", self.add_child),
-            ("同级", self.add_sibling),
+            ("＋子主题", self.add_child),
+            ("＋同级", self.add_sibling),
             ("编辑", self.edit_selected),
             ("删除", self.delete_selected),
-            ("进度+", self.progress_up),
-            ("进度-", self.progress_down),
-            ("折叠", self.toggle_collapse),
-            ("链接", self.edit_link),
+            ("进度＋", self.progress_up),
+            ("进度－", self.progress_down),
+            ("折叠/展开", self.toggle_collapse),
+            ("设置链接", self.edit_link),
             ("打开链接", self.open_selected_link),
             ("适屏", self.fit_view),
             ("保存", self.save_now),
             ("新建", self.new_map),
         ]
+
         for text, callback in buttons:
-            btn = Button(text=text, **button_kwargs())
-            btn.bind(on_release=lambda _b, fn=callback: fn())
+            btn = Button(text=text, **toolbar_button_kwargs())
+            # Use a safe wrapper so Android callback exceptions are visible
+            # in the status bar instead of looking like "nothing happened".
+            btn.bind(
+                on_release=lambda _b, fn=callback, name=text:
+                    self._run_action(name, fn)
+            )
             toolbar.add_widget(btn)
-        toolbar_scroll.add_widget(toolbar)
-        root.add_widget(toolbar_scroll)
+
+        root.add_widget(toolbar)
 
         self.map_widget = MindMapCanvas(self)
         root.add_widget(self.map_widget)
@@ -741,18 +765,31 @@ class MindFlowAndroidApp(App):
         self.status_label = Label(
             text=self.status_text,
             size_hint_y=None,
-            height=dp(34),
+            height=dp(38),
             halign="left",
             valign="middle",
             color=(0.25, 0.25, 0.32, 1),
             **label_kwargs(),
         )
-        self.status_label.bind(size=lambda inst, val: setattr(inst, "text_size", (inst.width - dp(16), None)))
+        self.status_label.bind(
+            size=lambda inst, val:
+                setattr(inst, "text_size", (inst.width - dp(16), None))
+        )
         root.add_widget(self.status_label)
-        self.bind(status_text=lambda _i, value: setattr(self.status_label, "text", value))
+        self.bind(
+            status_text=lambda _i, value:
+                setattr(self.status_label, "text", value)
+        )
 
         Clock.schedule_once(lambda dt: self.map_widget.fit_view(), 0.3)
         return root
+
+    def _run_action(self, name, fn):
+        """Run a toolbar action and make failures visible on-screen."""
+        try:
+            fn()
+        except Exception as exc:
+            self.status_text = f"{name}失败：{type(exc).__name__}: {exc}"
 
     def on_pause(self):
         self.save_now(silent=True)
@@ -769,8 +806,11 @@ class MindFlowAndroidApp(App):
     def mark_changed(self):
         if self._save_event is not None:
             self._save_event.cancel()
-        self._save_event = Clock.schedule_once(lambda dt: self.save_now(silent=True), 0.8)
-        self.map_widget.redraw()
+        self._save_event = Clock.schedule_once(
+            lambda dt: self.save_now(silent=True), 0.8
+        )
+        if self.map_widget:
+            self.map_widget.redraw()
 
     def _load_autosave(self):
         try:
@@ -799,18 +839,54 @@ class MindFlowAndroidApp(App):
             self.map_widget.fit_view()
 
     def add_child(self):
-        nid = self.map_widget.selected_id
-        new_id = self.model.add_child(nid, "")
+        if not self.map_widget:
+            self.status_text = "画布尚未准备好"
+            return
+
+        parent_id = self.map_widget.selected_id or self.model.root_id
+        if parent_id not in self.model.nodes:
+            parent_id = self.model.root_id
+
+        # Create a VISIBLE node first. Even if the editor/keyboard later fails,
+        # the user can immediately see that the button worked.
+        new_id = self.model.add_child(parent_id, "新主题")
         self.map_widget.selected_id = new_id
+        self.status_text = "已创建子主题"
         self.mark_changed()
-        self.edit_node(new_id)
+
+        def after_create(_dt):
+            try:
+                self.map_widget.compute_layout()
+                self.map_widget.ensure_selected_visible()
+                self.edit_node(new_id)
+            except Exception as exc:
+                self.status_text = f"节点已创建，但打开编辑框失败：{exc}"
+
+        Clock.schedule_once(after_create, 0.12)
 
     def add_sibling(self):
-        nid = self.map_widget.selected_id
-        new_id = self.model.add_sibling(nid, "")
+        if not self.map_widget:
+            self.status_text = "画布尚未准备好"
+            return
+
+        current_id = self.map_widget.selected_id or self.model.root_id
+        if current_id not in self.model.nodes:
+            current_id = self.model.root_id
+
+        new_id = self.model.add_sibling(current_id, "新主题")
         self.map_widget.selected_id = new_id
+        self.status_text = "已创建同级主题"
         self.mark_changed()
-        self.edit_node(new_id)
+
+        def after_create(_dt):
+            try:
+                self.map_widget.compute_layout()
+                self.map_widget.ensure_selected_visible()
+                self.edit_node(new_id)
+            except Exception as exc:
+                self.status_text = f"节点已创建，但打开编辑框失败：{exc}"
+
+        Clock.schedule_once(after_create, 0.12)
 
     def edit_selected(self):
         self.edit_node(self.map_widget.selected_id)
